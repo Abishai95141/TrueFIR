@@ -5,67 +5,107 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { useAuth } from '@/hooks/useAuth';
 import { useWeb3 } from '@/hooks/useWeb3';
-import { FileText, Plus, ExternalLink, Shield } from 'lucide-react';
+import { FileText, Plus, ExternalLink, Shield, RefreshCw } from 'lucide-react';
 import { FIRData, FIRStatus } from '@/types/fir';
 import { getBlockchainExplorerUrl } from '@/lib/web3-utils';
 import { getIPFSGatewayUrl } from '@/lib/ipfs-utils';
+import { toast } from 'react-hot-toast';
 
 const CivilianDashboard = () => {
   const { user } = useAuth();
   const { account } = useWeb3();
   const [firs, setFirs] = useState<FIRData[]>([]);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const fetchUserFIRs = async () => {
+    if (!account) {
+      setFirs([]);
+      return;
+    }
+
+    try {
+      const { queryAllFIRSubmittedEvents, queryFIRFromBlockchain } = await import('@/lib/web3-utils');
+      const { fetchFromIPFS } = await import('@/lib/ipfs-utils');
+      
+      // Get all FIR events from blockchain
+      const events = await queryAllFIRSubmittedEvents();
+      
+      // Filter events by current user's wallet address
+      const userEvents = events.filter(
+        event => event.submitter.toLowerCase() === account.toLowerCase()
+      );
+      
+      // Fetch full FIR data from IPFS and current status from blockchain
+      const firPromises = userEvents.map(async (event) => {
+        try {
+          const ipfsData = await fetchFromIPFS(event.dataCID);
+          const { generateFIRId } = await import('@/lib/web3-utils');
+          
+          // For backward compatibility: use id from IPFS if available, 
+          // otherwise generate from the data (for old FIRs)
+          const firId = ipfsData.id || generateFIRId(ipfsData);
+          
+          // Fetch current status from blockchain
+          let blockchainStatus: FIRStatus = ipfsData.status || 'pending';
+          try {
+            const blockchainData = await queryFIRFromBlockchain(firId);
+            if (blockchainData) {
+              // Map blockchain status to FIRStatus (0: pending, 1: under_investigation, 2: closed)
+              const statusMap: Record<number, FIRStatus> = {
+                0: 'pending',
+                1: 'under_investigation',
+                2: 'closed'
+              };
+              blockchainStatus = statusMap[blockchainData.status] || 'pending';
+            }
+          } catch (statusError) {
+            console.warn(`Could not fetch blockchain status for FIR ${firId}:`, statusError);
+          }
+          
+          return {
+            ...ipfsData,
+            id: firId,
+            status: blockchainStatus, // Use blockchain status instead of IPFS status
+            blockchainTxHash: event.transactionHash,
+            createdAt: ipfsData.createdAt || new Date().toISOString()
+          };
+        } catch (error) {
+          console.error(`Error fetching IPFS data for event:`, error);
+          return null;
+        }
+      });
+      
+      const firs = (await Promise.all(firPromises)).filter(Boolean) as FIRData[];
+      setFirs(firs);
+    } catch (error) {
+      console.error('Error fetching FIRs:', error);
+      setFirs([]);
+    }
+  };
 
   useEffect(() => {
-    const fetchUserFIRs = async () => {
-      if (!account) {
-        setFirs([]);
-        return;
-      }
-
-      try {
-        const { queryAllFIRSubmittedEvents } = await import('@/lib/web3-utils');
-        const { fetchFromIPFS } = await import('@/lib/ipfs-utils');
-        
-        // Get all FIR events from blockchain
-        const events = await queryAllFIRSubmittedEvents();
-        
-        // Filter events by current user's wallet address
-        const userEvents = events.filter(
-          event => event.submitter.toLowerCase() === account.toLowerCase()
-        );
-        
-        // Fetch full FIR data from IPFS for each event
-        const firPromises = userEvents.map(async (event) => {
-          try {
-            const ipfsData = await fetchFromIPFS(event.dataCID);
-            const { generateFIRId } = await import('@/lib/web3-utils');
-            
-            // For backward compatibility: use id from IPFS if available, 
-            // otherwise generate from the data (for old FIRs)
-            const firId = ipfsData.id || generateFIRId(ipfsData);
-            
-            return {
-              ...ipfsData,
-              id: firId, // Ensure id is set
-              blockchainTxHash: event.transactionHash,
-              createdAt: ipfsData.createdAt || new Date().toISOString()
-            };
-          } catch (error) {
-            console.error(`Error fetching IPFS data for event:`, error);
-            return null;
-          }
-        });
-        
-        const firs = (await Promise.all(firPromises)).filter(Boolean) as FIRData[];
-        setFirs(firs);
-      } catch (error) {
-        console.error('Error fetching FIRs:', error);
-        setFirs([]);
-      }
-    };
-
     fetchUserFIRs();
+    
+    // Poll for updates every 30 seconds
+    const pollInterval = setInterval(() => {
+      fetchUserFIRs();
+    }, 30000);
+    
+    return () => clearInterval(pollInterval);
   }, [account]);
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    toast.loading('Refreshing FIR data...', { id: 'refresh' });
+    try {
+      await fetchUserFIRs();
+      toast.success('FIR data refreshed!', { id: 'refresh' });
+    } catch (error) {
+      toast.error('Failed to refresh', { id: 'refresh' });
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   const getStatusBadgeVariant = (status?: FIRStatus) => {
     switch (status) {
@@ -86,12 +126,22 @@ const CivilianDashboard = () => {
               View and track your submitted First Information Reports
             </p>
           </div>
-          <Link to="/fir-submission">
-            <Button variant="hero">
-              <Plus className="mr-2 h-4 w-4" />
-              File New FIR
+          <div className="flex gap-3">
+            <Button 
+              variant="outline" 
+              onClick={handleRefresh}
+              disabled={isRefreshing}
+            >
+              <RefreshCw className={`mr-2 h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+              Refresh
             </Button>
-          </Link>
+            <Link to="/fir-submission">
+              <Button variant="hero">
+                <Plus className="mr-2 h-4 w-4" />
+                File New FIR
+              </Button>
+            </Link>
+          </div>
         </div>
 
         {/* Stats Cards */}
