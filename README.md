@@ -1,4 +1,4 @@
-# SecureFIR - Blockchain-Based FIR Filing System
+# TrueFIR - Blockchain-Based FIR Filing System
 
 A full-stack decentralized application for filing and managing First Information Reports (FIRs) using blockchain technology and IPFS for immutable, transparent record-keeping.
 
